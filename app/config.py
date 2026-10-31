@@ -13,13 +13,35 @@ AWS_REGION = _env("AWS_REGION", _env("AWS_DEFAULT_REGION", "us-east-1"))
 BUCKET_NAME = _env("BUCKET_NAME")
 TABLE_NAME = _env("TABLE_NAME")
 
-# LLM provider: "bedrock" (Amazon Bedrock, IAM auth - default),
-# "aws" (Claude Platform on AWS, IAM auth + workspace id) or
-# "anthropic" (Claude API with ANTHROPIC_API_KEY).
-LLM_PROVIDER = _env("LLM_PROVIDER", "bedrock").lower()
-_default_model = "anthropic.claude-opus-5-5" if LLM_PROVIDER == "bedrock" else "claude-opus-5-5"
-LLM_MODEL = _env("LLM_MODEL", _default_model)
-# Bedrock has no server-side fallbacks; on a safety refusal the SDK middleware retries on this model.
+# LLM provider:
+#   "nova"      - Amazon Nova on Bedrock via the Converse API (default)
+#   "bedrock"   - Claude on Amazon Bedrock
+#   "aws"       - Claude Platform on AWS (IAM auth + ANTHROPIC_AWS_WORKSPACE_ID)
+#   "anthropic" - Claude API (ANTHROPIC_API_KEY)
+LLM_PROVIDER = _env("LLM_PROVIDER", "nova").lower()
+
+
+def _geo_prefix(region: str) -> str:
+    """Cross-region inference profile prefix for the deploy region (Nova needs a profile in most regions)."""
+    if region.startswith("us-gov"):
+        return "us-gov"
+    if region.startswith(("us-", "ca-")):
+        return "us"
+    if region.startswith("eu-"):
+        return "eu"
+    if region.startswith("ap-"):
+        return "apac"
+    return "us"
+
+
+_DEFAULT_MODELS = {
+    "nova": f"{_geo_prefix(AWS_REGION)}.amazon.nova-pro-v1:0",
+    "bedrock": "anthropic.claude-opus-5-5",
+}
+LLM_MODEL = _env("LLM_MODEL", _DEFAULT_MODELS.get(LLM_PROVIDER, "claude-opus-5-5"))
+# Max output tokens per call (Nova Pro allows up to 10k).
+LLM_MAX_TOKENS = int(_env("LLM_MAX_TOKENS", "8000"))
+# Claude on Bedrock has no server-side `fallbacks`; on a safety refusal the SDK middleware retries on this model.
 BEDROCK_FALLBACK_MODEL = _env("BEDROCK_FALLBACK_MODEL", "anthropic.claude-opus-5")
 LLM_EFFORT = _env("LLM_EFFORT", "high")
 

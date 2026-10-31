@@ -158,3 +158,49 @@ def test_strict_schemas_are_closed():
                 for v in node:
                     check(v)
         check(sch)
+
+
+def test_inline_schema_has_no_refs():
+    from schemas import inline_schema
+    for model in (FitAnalysis, QuestionSet, InterviewEvaluation):
+        text = json.dumps(inline_schema(model))
+        assert "$ref" not in text and "$defs" not in text and "allOf" not in text
+    fit = inline_schema(FitAnalysis)
+    assert fit["properties"]["score_breakdown"]["properties"]["skills"]["properties"]["score"]["type"] == "integer"
+
+
+def test_nova_call_retries_on_invalid_output(monkeypatch):
+    import llm
+
+    good = {"answers": [{"question_id": "q1", "score": 7, "key_points_covered": ["k"], "key_points_missed": [],
+                         "evidence_quotes": ["q"], "red_flags_observed": [], "reasoning": "r", "improvement_advice": "a"}],
+            "strengths": [], "concerns": [], "overall_reasoning": ""}
+    bad = json.loads(json.dumps(good)); bad["answers"][0]["score"] = 11  # out of range
+    sent = []
+
+    class FakeBedrock:
+        def converse(self, **kw):
+            sent.append(kw)
+            body = bad if len(sent) == 1 else good
+            return {"stopReason": "tool_use", "output": {"message": {"role": "assistant", "content": [
+                {"toolUse": {"toolUseId": f"t{len(sent)}", "name": "submit_interviewevaluation", "input": body}}]}}}
+
+    monkeypatch.setattr(llm.config, "LLM_PROVIDER", "nova")
+    monkeypatch.setattr(llm, "_bedrock", lambda: FakeBedrock())
+    out = llm.structured_call(system="s", content=[
+        {"type": "text", "text": "hi"},
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERg=="}}],
+        output_model=InterviewEvaluation)
+    assert out.answers[0].score == 7 and len(sent) == 2
+    first = sent[0]
+    assert first["toolConfig"]["toolChoice"] == {"tool": {"name": "submit_interviewevaluation"}}
+    assert first["inferenceConfig"]["temperature"] == 0.0
+    assert first["messages"][0]["content"][1]["document"]["source"]["bytes"] == b"%PDF"
+    retry_msg = sent[1]["messages"][-1]["content"][0]["toolResult"]
+    assert retry_msg["toolUseId"] == "t1" and "Validation failed" in retry_msg["content"][0]["text"]
+
+
+def test_default_model_is_regional_nova():
+    import config
+    assert config._geo_prefix("ap-south-1") == "apac" and config._geo_prefix("us-east-1") == "us"
+    assert config._geo_prefix("eu-west-1") == "eu"

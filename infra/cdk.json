@@ -1,7 +1,7 @@
 {
   "app": "python3 app.py",
   "context": {
-    "llmProvider": "bedrock",
+    "llmProvider": "nova",
     "llmModel": "",
     "accessCode": "",
     "numQuestions": "5"

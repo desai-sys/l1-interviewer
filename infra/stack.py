@@ -4,7 +4,7 @@ CloudFront (HTTPS, needed for microphone access)
   -> Application Load Balancer (only accepts requests carrying CloudFront's secret header)
     -> ECS Fargate service (FastAPI app + static frontend)
          -> S3 (resumes, audio, transcripts, reports)   -> DynamoDB (session state)
-         -> Amazon Transcribe (speech-to-text)          -> Claude via Amazon Bedrock
+         -> Amazon Transcribe (speech-to-text)          -> Amazon Nova via Bedrock
 """
 from pathlib import Path
 
@@ -35,7 +35,7 @@ class L1InterviewerStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
         ctx = lambda key, default="": self.node.try_get_context(key) or default  # noqa: E731
 
-        provider = ctx("llmProvider", "bedrock")
+        provider = ctx("llmProvider", "nova")
 
         # ---- Storage --------------------------------------------------------
         bucket = s3.Bucket(
@@ -124,6 +124,15 @@ class L1InterviewerStack(Stack):
             actions=["transcribe:StartTranscriptionJob", "transcribe:GetTranscriptionJob"],
             resources=["*"],
         ))
+        if provider == "nova":
+            # Converse calls need InvokeModel on the inference profile and the foundation models it routes to.
+            role.add_to_principal_policy(iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=[
+                    "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
+                    f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
+                ],
+            ))
         if provider == "bedrock":
             role.add_to_principal_policy(iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock-mantle:*"],

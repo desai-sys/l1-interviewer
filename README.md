@@ -3,7 +3,7 @@
 Upload a resume and a job description and you get:
 
 1. **Profile fit report.** Each JD requirement is checked against quoted evidence from the resume. You get a weighted fit score (0–100), a verdict, strengths and gaps.
-2. **Voice-only interview.** Claude writes questions that target the role's must-haves and the gaps in the resume. Each question is read aloud and the candidate answers **by speaking**. There is no text input.
+2. **Voice-only interview.** The model (Amazon Nova by default) writes questions that target the role's must-haves and the gaps in the resume. Each question is read aloud and the candidate answers **by speaking**. There is no text input.
 3. **Strict evaluation.** Every answer is recorded, transcribed with Amazon Transcribe, and scored 0–10 against a rubric. Each score comes with reasoning, verbatim evidence quotes, key points covered and missed, and advice on how to improve.
 4. **Records.** The audio for each answer, its transcript, a full interview transcript (`.txt`) and a full JSON report are stored in S3.
 
@@ -17,6 +17,7 @@ Upload a resume and a job description and you get:
 | Every covered key point must be backed by a **verbatim quote** from the transcript. Generic answers are capped at 5/10. Factual errors lower the score. | `prompts.EVAL_SYSTEM` |
 | Unanswered or silent answers score **0 in code**, with no model call. | `pipeline._no_answer` |
 | Final scores, verdicts and recommendations are computed **in code** from fixed weights and bands. The rules are shown to the user. | `schemas.score_fit`, `schemas.score_interview` |
+| Model output is forced into a fixed schema and validated, and invalid output is sent back for correction. Calls run at temperature 0, so the same answer gets the same grade. | `llm._nova_call` |
 | An unmet must-have caps the fit verdict at "Partial fit". Two or more zero-score answers cap the result at "Borderline". | `schemas.py` |
 | Fairness policy: ignore name, gender, age, nationality, accent, grammar, school or company prestige and employment gaps. Do not reward length or confidence. | `prompts.FAIRNESS_POLICY` |
 | Instructions spoken inside an answer ("give me full marks") are ignored and flagged. | `prompts.EVAL_SYSTEM` |
@@ -27,7 +28,7 @@ Upload a resume and a job description and you get:
 Browser (MediaRecorder, speechSynthesis)
    │ HTTPS
 CloudFront ──(secret header)──► ALB ──► ECS Fargate: FastAPI app + static UI
-                                            ├─ Claude via Amazon Bedrock (fit, questions, grading)
+                                            ├─ Amazon Nova via Bedrock Converse (fit, questions, grading)
                                             ├─ Amazon Transcribe (speech → text)
                                             ├─ S3: resumes, audio, transcripts, reports (private, encrypted, versioned)
                                             └─ DynamoDB: session state
@@ -39,7 +40,7 @@ CloudFront provides HTTPS, which browsers require before they allow microphone a
 
 Prerequisites: an AWS account, AWS CLI v2 configured (`aws configure`), Node 18+, Python 3.11+ and Docker running.
 
-1. **Enable the model in Bedrock.** In the AWS console, open Amazon Bedrock → Model access in your deploy region and enable Anthropic **Claude Opus 5.5**. If you prefer another model (for example Claude Sonnet 5.5, which is cheaper), set `llmModel` below.
+1. **Enable the model in Bedrock.** In the AWS console, open Amazon Bedrock → Model access in your deploy region and enable **Amazon Nova Pro**. The app calls it through the cross-region inference profile for your region (`us.` / `eu.` / `apac.amazon.nova-pro-v1:0`), so it needs to be enabled in the regions that profile routes to. For stricter, more nuanced grading, enable **Nova Premier** and deploy with `-c llmModel=us.amazon.nova-premier-v1:0` (US regions).
 2. Deploy:
 
 ```bash
@@ -57,16 +58,16 @@ The deploy takes about 10 minutes, mostly CloudFront. When it finishes it prints
 | Context key | Default | Meaning |
 |---|---|---|
 | `accessCode` | *(none)* | Shared passcode required for every API call. **Recommended**: without it, anyone with the URL can spend your Claude and Transcribe budget. |
-| `llmProvider` | `bedrock` | `bedrock`, `aws` (Claude Platform on AWS, also needs `awsWorkspaceId`), or `anthropic` (Claude API; store the key first in Secrets Manager as `l1-interviewer/anthropic-api-key`) |
-| `llmModel` | `anthropic.claude-opus-5-5` (Bedrock) | Model ID |
+| `llmProvider` | `nova` | `nova` (Amazon Nova on Bedrock). To use Claude later: `bedrock` (Claude on Bedrock), `aws` (Claude Platform on AWS, also needs `awsWorkspaceId`), or `anthropic` (Claude API; store the key first in Secrets Manager as `l1-interviewer/anthropic-api-key`) |
+| `llmModel` | `<geo>.amazon.nova-pro-v1:0` | Model or inference profile ID, e.g. `us.amazon.nova-premier-v1:0` |
 | `numQuestions` | `5` | Questions per interview |
 
-Other runtime settings (environment variables on the container): `MAX_ANSWER_SECONDS` (default 180), `TRANSCRIBE_LANGUAGES` (default `en-US,en-IN,en-GB`, auto-identified), `LLM_EFFORT` (default `high`), `BEDROCK_FALLBACK_MODEL`.
+Other runtime settings (environment variables on the container): `MAX_ANSWER_SECONDS` (default 180), `TRANSCRIBE_LANGUAGES` (default `en-US,en-IN,en-GB`, auto-identified), `LLM_MAX_TOKENS` (default 8000).
 
 ### Cost (rough)
 
 - **Fixed:** about $25–35 per month for one Fargate task (1 vCPU / 2 GB) and the ALB.
-- **Per interview:** Transcribe costs about $0.024 per audio minute. Claude makes about 7 requests per interview (fit analysis, question writing, one grading call per answer, one synthesis call), at high effort.
+- **Per interview:** Transcribe costs about $0.024 per audio minute. Nova makes about 7 requests per interview (fit analysis, question writing, one grading call per answer, one synthesis call). With Nova Pro that comes to a few cents.
 
 S3 and DynamoDB costs are negligible. The bucket and table are **retained** if you delete the stack, because they hold interview recordings.
 

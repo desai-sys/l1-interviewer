@@ -209,3 +209,35 @@ def strict_schema(model: type[BaseModel]) -> dict:
 
     walk(schema)
     return schema
+
+
+def inline_schema(model: type[BaseModel]) -> dict:
+    """Tool-input schema for Bedrock Converse (Nova): `$ref`s inlined, only basic keywords kept."""
+    schema = strict_schema(model)
+    defs = schema.pop("$defs", {})
+    keep = {"type", "properties", "required", "items", "enum", "description"}
+
+    def resolve(node):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                target = resolve(defs[node["$ref"].split("/")[-1]])
+                if node.get("description"):
+                    target = {**target, "description": node["description"]}
+                return target
+            if "allOf" in node and len(node["allOf"]) == 1:  # pydantic wraps described refs in allOf
+                merged = {**resolve(node["allOf"][0])}
+                if node.get("description"):
+                    merged["description"] = node["description"]
+                return merged
+            out = {}
+            for k, v in node.items():
+                if k == "properties":
+                    out[k] = {name: resolve(sub) for name, sub in v.items()}
+                elif k in keep:
+                    out[k] = resolve(v)
+            return out
+        if isinstance(node, list):
+            return [resolve(x) for x in node]
+        return node
+
+    return resolve(schema)
