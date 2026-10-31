@@ -1,0 +1,9 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "llmProvider": "bedrock",
+    "llmModel": "",
+    "accessCode": "",
+    "numQuestions": "5"
+  }
+}
