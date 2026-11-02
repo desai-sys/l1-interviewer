@@ -127,6 +127,41 @@ def _nova_call(system: str, content: list[dict], output_model: type[T], max_toke
     raise LLMError(f"The model returned an invalid response after 3 attempts: {last_error[:300]}")
 
 
+def web_search(system: str, prompt: str) -> tuple[str, list[str]]:
+    """Ask a Nova model with the built-in `nova_grounding` web search tool.
+
+    Returns (answer text, cited URLs). Handles both documented citation shapes
+    (`citationsContent` as its own block with `citations`, or as a list on the text block).
+    """
+    try:
+        resp = _bedrock().converse(
+            modelId=config.WEB_RESEARCH_MODEL,
+            system=[{"text": system}],
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            toolConfig={"tools": [{"systemTool": {"name": "nova_grounding"}}]},
+            inferenceConfig={"maxTokens": 6000, "temperature": 0.0},
+        )
+    except ClientError as exc:
+        err = exc.response.get("Error", {})
+        raise LLMError(f"Web search failed ({err.get('Code')}): {err.get('Message', exc)}") from exc
+
+    texts, urls = [], []
+
+    def collect(cit):
+        items = cit.get("citations", []) if isinstance(cit, dict) else cit or []
+        for c in items:
+            url = (((c or {}).get("location") or {}).get("web") or {}).get("url")
+            if url and url not in urls:
+                urls.append(url)
+
+    for block in resp["output"]["message"]["content"]:
+        if "text" in block:
+            texts.append(block["text"])
+        if "citationsContent" in block:
+            collect(block["citationsContent"])
+    return "".join(texts), urls
+
+
 # ---------------------------------------------------------------------------
 # Claude (optional)
 # ---------------------------------------------------------------------------

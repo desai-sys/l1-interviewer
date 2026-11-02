@@ -3,7 +3,7 @@
 Upload a resume and a job description and you get:
 
 1. **Profile fit report.** Each JD requirement is checked against quoted evidence from the resume. You get a weighted fit score (0–100), a verdict, strengths and gaps.
-2. **Voice-only interview.** The model (Amazon Nova by default) writes questions that target the role's must-haves and the gaps in the resume. Each question is read aloud and the candidate answers **by speaking**. There is no text input.
+2. **Voice-only interview.** Nova searches the web (Amazon Nova Web Grounding) for real interview questions for this role. At least half of the interview is drawn from them, each with its source link. The rest are written to target the JD's must-haves and the gaps in the resume. Each question is read aloud and **recording starts automatically the moment it finishes**. There is no text input, no replay, no skipping and no re-recording.
 3. **Strict evaluation.** Every answer is recorded, transcribed with Amazon Transcribe, and scored 0–10 against a rubric. Each score comes with reasoning, verbatim evidence quotes, key points covered and missed, and advice on how to improve.
 4. **Records.** The audio for each answer, its transcript, a full interview transcript (`.txt`) and a full JSON report are stored in S3.
 
@@ -13,6 +13,10 @@ Upload a resume and a job description and you get:
 |---|---|
 | The rubric (key points, red flags, excellent/adequate/poor) is written **before** any answer is heard and hidden from the candidate until grading. | `pipeline.run_screen`, `main.get_session` |
 | Each answer is graded in its **own request**, so answers can't influence each other. | `pipeline._grade_one` |
+| Every evidence quote is **checked in code** against the transcript. Fabricated quotes are discarded and trigger a re-grade. With no verifiable quote, or fewer than 15 words, the score is capped at 2. | `pipeline._verified_quotes` |
+| **Interview rules enforced by the server:** questions are revealed one at a time (none can be previewed), each is answered once, and only before its deadline. Missed deadlines and early exits score 0. | `main.next_question`, `main.submit_answer` |
+| Web-sourced questions keep only URLs returned as search citations; invented URLs are removed. | `pipeline.research_questions` |
+| Tab switches, time away and fullscreen exits are logged per answer and shown to the reviewer (they don't change the score automatically). | `app.js`, report |
 | The answer grader **never sees the resume**, so resume claims can't inflate interview scores. | `pipeline._grade_one` |
 | Every covered key point must be backed by a **verbatim quote** from the transcript. Generic answers are capped at 5/10. Factual errors lower the score. | `prompts.EVAL_SYSTEM` |
 | Unanswered or silent answers score **0 in code**, with no model call. | `pipeline._no_answer` |
@@ -40,7 +44,7 @@ CloudFront provides HTTPS, which browsers require before they allow microphone a
 
 Prerequisites: an AWS account, AWS CLI v2 configured (`aws configure`), Node 22 or 24 LTS and Python 3.11+. **Docker is not needed**: the container image is built inside AWS by CodeBuild during `cdk deploy` (`infra/image_build.py`).
 
-1. **Enable the model in Bedrock.** In the AWS console, open Amazon Bedrock → Model access in your deploy region and enable **Amazon Nova Pro**. The app calls it through the cross-region inference profile for your region (`us.` / `eu.` / `apac.amazon.nova-pro-v1:0`), so it needs to be enabled in the regions that profile routes to. For stricter, more nuanced grading, enable **Nova Premier** and deploy with `-c llmModel=us.amazon.nova-premier-v1:0` (US regions).
+1. **Enable the models in Bedrock.** Enable **Nova Premier** too, because it runs the web search for questions. In the AWS console, open Amazon Bedrock → Model access in your deploy region and enable **Amazon Nova Pro**. The app calls it through the cross-region inference profile for your region (`us.` / `eu.` / `apac.amazon.nova-pro-v1:0`), so it needs to be enabled in the regions that profile routes to. For stricter, more nuanced grading, enable **Nova Premier** and deploy with `-c llmModel=us.amazon.nova-premier-v1:0` (US regions).
 2. Deploy:
 
 ```bash
@@ -61,6 +65,8 @@ The deploy takes about 15–20 minutes: the image build in CodeBuild takes about
 | `llmProvider` | `nova` | `nova` (Amazon Nova on Bedrock). To use Claude later: `bedrock` (Claude on Bedrock), `aws` (Claude Platform on AWS, also needs `awsWorkspaceId`), or `anthropic` (Claude API; store the key first in Secrets Manager as `l1-interviewer/anthropic-api-key`) |
 | `llmModel` | `<geo>.amazon.nova-pro-v1:0` | Model or inference profile ID, e.g. `us.amazon.nova-premier-v1:0` |
 | `numQuestions` | `5` | Questions per interview |
+| `webResearch` | `on` in US regions | `on`/`off`: search the web for real interview questions (Nova Web Grounding, US regions only) |
+| `webResearchModel` | `us.amazon.nova-premier-v1:0` | Model used for web search (`us.amazon.nova-2-lite-v1:0` also supports it) |
 
 Other runtime settings (environment variables on the container): `MAX_ANSWER_SECONDS` (default 180), `TRANSCRIBE_LANGUAGES` (default `en-US,en-IN,en-GB`, auto-identified), `LLM_MAX_TOKENS` (default 8000).
 

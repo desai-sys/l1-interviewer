@@ -99,6 +99,9 @@ class InterviewQuestion(BaseModel):
     id: str = Field(description="q1, q2, ... in order.")
     question: str = Field(description="Spoken question, max ~45 words, one question only.")
     type: Literal["technical", "behavioral", "situational", "experience_verification"]
+    source: Literal["web", "generated"] = Field(
+        description="'web' if selected or adapted from the web question bank, otherwise 'generated'.")
+    source_url: str = Field(description="For 'web' questions, the exact source URL from the bank. Otherwise an empty string.")
     assesses: str = Field(description="Which JD requirement or resume claim this question tests.")
     key_points: list[str] = Field(description="Concrete points a strong answer should cover.")
     red_flags: list[str]
@@ -107,6 +110,13 @@ class InterviewQuestion(BaseModel):
 
 class QuestionSet(BaseModel):
     questions: list[InterviewQuestion]
+
+
+class WebQuestion(BaseModel):
+    question: str
+    topic: str
+    source_url: str
+    verified: bool = True  # source URL matched a citation returned by the web search
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +181,9 @@ def score_interview(evaluation: InterviewEvaluation, num_questions: int) -> dict
             "Interview score = sum of answer scores / (10 x number of questions) x 100. Unanswered questions score 0.",
             "Bands: 80+ strongly recommend, 65-79 recommend, 50-64 borderline, below 50 do not advance.",
             "Two or more zero-score answers cap the result at 'Borderline'.",
+            "Every evidence quote is checked in code against the transcript; unverifiable quotes are discarded, "
+            "and an answer with no verifiable evidence (or under the minimum word count) cannot score above 2.",
+            "Each question is answered once, within a fixed time limit, with recording starting automatically.",
         ],
     }
 

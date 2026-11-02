@@ -11,7 +11,7 @@ from botocore.config import Config
 import config
 
 # Fields stored as JSON strings (avoids DynamoDB's Decimal handling for nested data).
-_JSON_FIELDS = ("fit", "questions", "answers", "evaluation", "error")
+_JSON_FIELDS = ("fit", "questions", "answers", "evaluation", "error", "web_research")
 
 
 @lru_cache(maxsize=1)

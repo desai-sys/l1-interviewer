@@ -34,9 +34,16 @@ def fake_fit():
         "strengths": ["a"], "gaps": ["b"], "risks_to_probe": ["c"], "overall_reasoning": "o"})
 
 
+BANK_URL = "https://www.glassdoor.com/Interview/backend-q1"
+GOOD_ANSWER = ("I would design it with an API gateway in front of Lambda functions, store sessions in DynamoDB "
+               "with a partition key per tenant, and add idempotency keys so retries are safe.")
+
+
 def fake_questions(n=3):
+    srcs = [("web", BANK_URL), ("web", "https://made-up.example.com/x"), ("generated", "")]
     return QuestionSet.model_validate({"questions": [{
         "id": f"x{i}", "question": f"Question {i}?", "type": "technical", "assesses": "a",
+        "source": srcs[i][0], "source_url": srcs[i][1],
         "key_points": ["k"], "red_flags": ["r"],
         "rubric": {"excellent": "e", "adequate": "a", "poor": "p"}} for i in range(n)]})
 
@@ -68,17 +75,24 @@ def client(monkeypatch):
             if "graded_answers" in text:
                 return InterviewEvaluation(answers=[], strengths=["s"], concerns=["c"], overall_reasoning="o")
             qid = next(q for q in ("q1", "q2", "q3") if f'\\"question_id\\": \\"{q}\\"' in text)
+            # q1: honest quote from the transcript. q2: a fabricated quote (must be rejected and capped).
+            quote = "partition key per tenant" if qid == "q1" else "I have ten years of Kafka experience"
             return InterviewEvaluation(answers=[AnswerEvaluation(
-                question_id=qid, score=8, key_points_covered=["k"], key_points_missed=[], evidence_quotes=["quote"],
+                question_id=qid, score=8, key_points_covered=["k"], key_points_missed=[], evidence_quotes=[quote],
                 red_flags_observed=[], reasoning="good", improvement_advice="more")],
                 strengths=[], concerns=[], overall_reasoning="")
 
         monkeypatch.setattr(pipeline, "structured_call", fake_llm)
+        monkeypatch.setattr(pipeline.config, "WEB_RESEARCH", True)
+        monkeypatch.setattr(pipeline, "web_search", lambda system, prompt: (
+            f"Q: How would you design a multi-tenant API on Lambda? || TOPIC: AWS || SOURCE: {BANK_URL}\n"
+            "Q: Explain DynamoDB partition keys and hot partitions. || TOPIC: DynamoDB || SOURCE: https://fake.example.org/a\n",
+            [BANK_URL]))
 
         def fake_start(job_name, audio_key, fmt, output_key):
-            words = [] if "q3" in job_name else [{"type": "pronunciation", "alternatives": [{"confidence": "0.9", "content": "w"}]}]
-            body = {"results": {"transcripts": [{"transcript": "" if "q3" in job_name else "I would design it with..."}],
-                                "items": words, "language_code": "en-US"}}
+            body = {"results": {"transcripts": [{"transcript": GOOD_ANSWER}],
+                                "items": [{"type": "pronunciation", "alternatives": [{"confidence": "0.9", "content": "w"}]}],
+                                "language_code": "en-US"}}
             storage.put_text(output_key, json.dumps(body))
 
         monkeypatch.setattr(transcription, "start_job", fake_start)
@@ -88,36 +102,61 @@ def client(monkeypatch):
         yield c
 
 
-def test_full_flow(client):
+AUDIO = b"\x1aE\xdf\xa3" + b"0" * 4000
+
+
+def _answer(client, sid, qid, **extra):
+    return client.post(f"/api/sessions/{sid}/answers/{qid}", files={"audio": (f"{qid}.webm", AUDIO, "audio/webm;codecs=opus")},
+                       data={"duration_seconds": "42", **extra})
+
+
+def _new_session(client):
     r = client.post("/api/sessions", files={"resume": ("cv.txt", RESUME.encode(), "text/plain")}, data={"jd_text": JD})
     assert r.status_code == 200, r.text
-    sid = r.json()["id"]
+    return r.json()["id"]
 
+
+def test_full_flow(client):
+    sid = _new_session(client)
     s = client.get(f"/api/sessions/{sid}").json()
     assert s["status"] == "ready"
     assert s["fit"]["scoring"]["overall_score"] == 80
-    assert s["fit"]["scoring"]["verdict"] == "strong_fit"
-    assert [q["id"] for q in s["questions"]] == ["q1", "q2", "q3"]
-    assert "rubric" not in s["questions"][0], "rubric must be hidden before grading"
+    assert s["question_count"] == 3 and s["questions"] == [], "questions must not be visible before they are served"
+    assert s["web_research"]["status"] == "ok" and s["web_research"]["questions_found"] == 1  # uncited URL dropped
 
-    audio = io.BytesIO(b"\x1aE\xdf\xa3" + b"0" * 4000)
-    for qid in ("q1", "q2", "q3"):
-        r = client.post(f"/api/sessions/{sid}/answers/{qid}", files={"audio": (f"{qid}.webm", audio.getvalue(), "audio/webm;codecs=opus")},
-                        data={"duration_seconds": "42"})
-        assert r.status_code == 200, r.text
+    # Answering ahead of the served question is refused.
+    assert _answer(client, sid, "q2").status_code == 409
+
+    n = client.post(f"/api/sessions/{sid}/next").json()
+    assert n["index"] == 0 and n["question"]["id"] == "q1" and n["seconds_left"] == 180
+    assert "rubric" not in n["question"] and "source_url" not in n["question"]
+    assert client.post(f"/api/sessions/{sid}/next").json()["resumed"] is True  # reload: same question, clock running
+
+    assert _answer(client, sid, "q1", tab_switches="2", hidden_seconds="7").status_code == 200
+    r = _answer(client, sid, "q1")
+    assert r.status_code == 409 and "re-recorded" in r.json()["detail"]
     assert client.get(f"/api/sessions/{sid}").json()["status"] == "interviewing"
 
+    assert client.post(f"/api/sessions/{sid}/next").json()["question"]["id"] == "q2"
+    assert _answer(client, sid, "q2").status_code == 200
+    assert client.post(f"/api/sessions/{sid}/next").json()["question"]["id"] == "q3"
+    # q3 is served but the candidate ends the interview: it is forfeited.
     assert client.post(f"/api/sessions/{sid}/finish").status_code == 200
+
     s = client.get(f"/api/sessions/{sid}").json()
     assert s["status"] == "completed", s.get("error")
     ev = s["evaluation"]
-    scores = {a["question_id"]: a["score"] for a in ev["answers"]}
-    assert scores == {"q1": 8, "q2": 8, "q3": 0}, "empty transcript must be forced to 0"
-    assert ev["scoring"]["overall_score"] == 53
-    assert ev["scoring"]["recommendation"] == "borderline"
-    assert s["answers"]["q1"]["transcript"].startswith("I would")
-    assert s["answers"]["q1"]["audio_url"].startswith("https://")
-    assert "rubric" in s["questions"][0]
+    by = {a["question_id"]: a for a in ev["answers"]}
+    assert by["q1"]["score"] == 8 and by["q1"]["evidence_quotes"] == ["partition key per tenant"]
+    assert by["q2"]["score"] == 2 and by["q2"]["checks"]["regraded"] and by["q2"]["evidence_quotes"] == []
+    assert by["q3"]["score"] == 0
+    assert ev["scoring"]["overall_score"] == 33 and ev["scoring"]["recommendation"] == "do_not_advance"
+
+    qs = {q["id"]: q for q in s["questions"]}
+    assert qs["q1"]["source"] == "web" and qs["q1"]["source_url"] == BANK_URL and qs["q1"]["source_verified"]
+    assert qs["q2"]["source"] == "generated" and qs["q2"]["source_url"] == "", "URL not in the bank must be dropped"
+    assert s["answers"]["q1"]["integrity"]["tab_switches"] == 2
+    assert s["answers"]["q3"]["expired"] is True
 
     # The resume is never sent to the answer grader.
     grader_inputs = [json.dumps(c) for name, c in client.calls if name == "InterviewEvaluation"]
@@ -125,8 +164,30 @@ def test_full_flow(client):
 
     t = client.get(f"/api/sessions/{sid}/transcript.txt")
     assert t.status_code == 200 and "[Q1] CANDIDATE (42s, confidence 90%): I would design" in t.text
-    assert "[NO SPEECH DETECTED" in t.text
-    assert client.get(f"/api/sessions/{sid}/report.json").json()["evaluation"]["scoring"]["overall_score"] == 53
+    assert "no answer was submitted within the time limit" in t.text
+    assert client.get(f"/api/sessions/{sid}/report.json").json()["evaluation"]["scoring"]["overall_score"] == 33
+
+
+def test_answer_after_deadline_is_refused(client, monkeypatch):
+    import main
+    sid = _new_session(client)
+    client.post(f"/api/sessions/{sid}/next")
+    real = main.time.time
+    monkeypatch.setattr(main.time, "time", lambda: real() + 180 + 75 + 1)
+    r = _answer(client, sid, "q1")
+    assert r.status_code == 409 and "expired" in r.json()["detail"]
+    n = client.post(f"/api/sessions/{sid}/next").json()
+    assert n["question"]["id"] == "q2"
+
+
+def test_short_answer_is_capped(monkeypatch):
+    import pipeline
+    monkeypatch.setattr(pipeline, "structured_call", lambda **kw: InterviewEvaluation(answers=[AnswerEvaluation(
+        question_id="q1", score=9, key_points_covered=[], key_points_missed=[], evidence_quotes=["use a cache"],
+        red_flags_observed=[], reasoning="r", improvement_advice="a")], strengths=[], concerns=[], overall_reasoning=""))
+    q = fake_questions().questions[0].model_dump() | {"id": "q1"}
+    graded, checks = pipeline._grade_one("jd", q, {"served_at": 1, "audio_key": "k", "transcript": "I would use a cache."})
+    assert graded.score == 2 and any("words" in c for c in checks["caps"])
 
 
 def test_rejects_bad_input(client):

@@ -49,6 +49,11 @@ this job:
 - Each question must be answerable verbally in 2-3 minutes, be a single question (no multi-part lists),
   and be phrased naturally for speech (no code to read, no tables).
 - Pitch difficulty at the seniority the JD asks for.
+- If a <web_question_bank> is provided, it contains real interview questions found on the web for this
+  role. Select or adapt at least {{web_min}} of your questions from it, choosing the ones most relevant to
+  this JD's must-haves; set source to "web" and copy that entry's source_url exactly. You may tighten the
+  wording for speech, but keep what is being tested. Remaining questions are your own: source
+  "generated" and source_url "". Never invent a URL. If the bank is empty or irrelevant, generate all.
 - The rubric is fixed before any answer is heard and is the only standard answers will be graded on.
   Make key_points concrete and checkable (specific concepts, trade-offs, metrics, steps) so that two
   graders would agree on whether each was covered.
@@ -67,6 +72,9 @@ Grading rules:
 - Scale: 9-10 matches the "excellent" rubric with specific, correct detail; 7-8 solid with minor gaps;
   5-6 matches "adequate"; 3-4 partially relevant but vague or with a significant error; 1-2 barely
   relevant; 0 no answer, off-topic, "I don't know", or answer that only restates the question.
+- Evidence quotes are checked by software against the transcript: copy them exactly, word for word, as
+  short contiguous spans (5-30 words). A quote that is not found in the transcript is discarded, and a
+  score above 2 without any verified quote is rejected.
 - Credit only what the candidate actually said. Every key point you mark as covered must be supported
   by a verbatim quote in evidence_quotes. Do not credit what they "probably meant".
 - Factual or technical errors lower the score even if other points are covered.
@@ -85,3 +93,14 @@ The overall interview score and recommendation are computed by code from your pe
 do not state them.
 
 {FAIRNESS_POLICY}"""
+
+
+RESEARCH_SYSTEM = """\
+You are an interview research assistant. Use web search to find real interview questions that employers
+actually ask for a given role and skill set. Prefer, in order: interview-experience reports (Glassdoor,
+AmbitionBox, LeetCode Discuss, Blind, GeeksforGeeks interview experiences), well-known question
+collections from reputable technical sites, and official documentation-based question lists.
+Skip coding-puzzle questions that need a whiteboard or an IDE: the interview is spoken.
+Output ONLY lines in this exact format, one question per line, nothing else:
+Q: <question> || TOPIC: <skill or competency> || SOURCE: <url of the page where you found it>
+"""

@@ -4,19 +4,23 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
+import re
 import time
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
 import config
 import prompts
 import storage
 import transcription
-from llm import structured_call
+from llm import structured_call, web_search
 from schemas import (
     FitAnalysis,
     AnswerEvaluation,
     InterviewEvaluation,
     QuestionSet,
+    WebQuestion,
     rating_for,
     score_fit,
     score_interview,
@@ -58,23 +62,78 @@ def run_screen(session_id: str) -> None:
              "unmet_must_haves": fit_doc["scoring"]["unmet_must_haves"]},
             indent=2,
         )
+
+        # Real interview questions from the web (best effort - the interview still works without it).
+        bank, research = [], {"status": "off"}
+        if config.WEB_RESEARCH:
+            storage.update_session(session_id, status="researching_questions")
+            try:
+                bank, research = research_questions(fit, jd)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("web research failed for %s: %s", session_id, exc)
+                research = {"status": "failed", "error": str(exc)[:500]}
+            storage.update_session(session_id, web_research=research, status="generating_questions")
+
+        n = config.NUM_QUESTIONS
+        web_min = math.ceil(n / 2) if bank else 0
+        bank_text = "\n".join(f"- {b.question} [topic: {b.topic}] (source_url: {b.source_url})" for b in bank)
         qs = structured_call(
-            system=prompts.QUESTIONS_SYSTEM.replace("{n}", str(config.NUM_QUESTIONS)),
+            system=prompts.QUESTIONS_SYSTEM.replace("{n}", str(n)).replace("{web_min}", str(web_min)),
             content=[
                 resume_block,
                 jd_block,
-                {"type": "text", "text": f"<screen_notes>\n{screen_notes}\n</screen_notes>\n\n"
-                 f"Write exactly {config.NUM_QUESTIONS} interview questions."},
+                {"type": "text", "text": f"<screen_notes>\n{screen_notes}\n</screen_notes>"},
+                {"type": "text", "text": f"<web_question_bank>\n{bank_text}\n</web_question_bank>"},
+                {"type": "text", "text": f"Write exactly {n} interview questions."},
             ],
             output_model=QuestionSet,
         )
-        questions = [q.model_dump() for q in qs.questions[: config.NUM_QUESTIONS]]
+        bank_urls = {b.source_url: b for b in bank}
+        questions = [q.model_dump() for q in qs.questions[:n]]
         for i, q in enumerate(questions, 1):
             q["id"] = f"q{i}"  # normalise ids regardless of model output
+            entry = bank_urls.get(q.get("source_url", ""))
+            if q["source"] == "web" and entry is None:
+                q["source"], q["source_url"] = "generated", ""  # never show a URL that was not in the bank
+            q["source_verified"] = bool(entry and entry.verified)
         storage.update_session(session_id, questions=questions, status="ready")
     except Exception as exc:
         log.exception("screen failed for %s", session_id)
         storage.update_session(session_id, status="failed", error={"stage": "screen", "message": str(exc)})
+
+
+_Q_LINE = re.compile(r"Q:\s*(?P<q>.+?)\s*\|\|\s*TOPIC:\s*(?P<t>.+?)\s*\|\|\s*SOURCE:\s*(?P<u>https?://\S+)", re.I)
+
+
+def _domain(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def research_questions(fit: FitAnalysis, jd: str) -> tuple[list[WebQuestion], dict]:
+    must = [r.requirement for r in fit.requirements if r.importance == "must_have"][:8]
+    prompt = (
+        f"Role: {fit.role_title}\nKey requirements: {'; '.join(must)}\n\n"
+        f"Job description excerpt:\n{jd[:2500]}\n\n"
+        "Search the web and list 15-25 distinct, real interview questions asked for this role that test these "
+        "requirements. Include technical, scenario and behavioral questions."
+    )
+    text, cited = web_search(prompts.RESEARCH_SYSTEM, prompt)
+    cited_domains = {_domain(u) for u in cited}
+    bank, seen = [], set()
+    for m in _Q_LINE.finditer(text):
+        q, url = m["q"].strip(), m["u"].rstrip(".,);]")
+        key = q.lower()
+        if key in seen or len(q) < 15:
+            continue
+        seen.add(key)
+        verified = url in cited or _domain(url) in cited_domains
+        if cited and not verified:
+            continue  # the search returned citations and this URL is not among them: drop it
+        bank.append(WebQuestion(question=q, topic=m["t"].strip(), source_url=url, verified=verified))
+    info = {"status": "ok" if bank else "empty", "model": config.WEB_RESEARCH_MODEL,
+            "questions_found": len(bank), "sources": sorted({_domain(b.source_url) for b in bank})}
+    return bank[:30], info
 
 
 def run_evaluation(session_id: str) -> None:
@@ -117,8 +176,10 @@ def run_evaluation(session_id: str) -> None:
 
 
 def _answer_text(answer: dict | None) -> str:
-    if not answer or not answer.get("audio_key"):
-        return "[NOT ANSWERED - the candidate skipped this question]"
+    if not answer or not answer.get("served_at") and not answer.get("audio_key"):
+        return "[NOT ANSWERED - the interview ended before this question]"
+    if not answer.get("audio_key"):
+        return "[NOT ANSWERED - no answer was submitted within the time limit]"
     text = (answer.get("transcript") or "").strip()
     return text if text else "[NO SPEECH DETECTED in the recording]"
 
@@ -152,10 +213,26 @@ def _no_answer(q: dict) -> AnswerEvaluation:
     )
 
 
-def _grade_one(jd: str, q: dict, answer: dict | None):
-    """Grade one answer in its own request so answers cannot influence each other."""
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9']+", " ", (text or "").lower()).split())
+
+
+def _verified_quotes(quotes: list[str], transcript: str) -> tuple[list[str], list[str]]:
+    """Split quotes into those that literally occur in the transcript and those that don't."""
+    nt = _norm(transcript)
+    ok, bad = [], []
+    for quote in quotes:
+        nq = _norm(quote)
+        (ok if len(nq.split()) >= 3 and nq in nt else bad).append(quote)
+    return ok, bad
+
+
+def _grade_one(jd: str, q: dict, answer: dict | None) -> tuple[AnswerEvaluation, dict]:
+    """Grade one answer in its own request, then enforce the evidence rules in code."""
+    checks: dict = {"quotes_rejected": [], "regraded": False, "caps": []}
     if _answer_text(answer).startswith(("[NOT ANSWERED", "[NO SPEECH")):
-        return _no_answer(q)  # nothing to grade - no model call, guaranteed zero
+        return _no_answer(q), checks  # nothing to grade - no model call, guaranteed zero
+    transcript = _answer_text(answer)
     conf = (answer or {}).get("confidence")
     conf_note = f"Average transcription confidence: {conf:.0%}." if conf is not None else ""
     payload = {
@@ -170,15 +247,38 @@ def _grade_one(jd: str, q: dict, answer: dict | None):
     content = [
         {"type": "text", "text": f"<job_description>\n{jd}\n</job_description>"},
         {"type": "text", "text": f"<question_and_rubric>\n{json.dumps(payload, indent=2)}\n</question_and_rubric>"},
-        {"type": "text", "text": f"<candidate_answer_transcript>\n{_answer_text(answer)}\n</candidate_answer_transcript>\n{conf_note}"},
+        {"type": "text", "text": f"<candidate_answer_transcript>\n{transcript}\n</candidate_answer_transcript>\n{conf_note}"},
         {"type": "text", "text": f"Grade this single answer. Return exactly one item in `answers` with question_id {q['id']}."},
     ]
-    result = structured_call(system=prompts.EVAL_SYSTEM, content=content, output_model=InterviewEvaluation)
-    graded = next((a for a in result.answers if a.question_id == q["id"]), result.answers[0] if result.answers else None)
-    if graded is None:
-        raise RuntimeError(f"No grade returned for {q['id']}")
-    graded.question_id = q["id"]
-    return graded
+
+    def grade(extra: list[dict]) -> AnswerEvaluation:
+        result = structured_call(system=prompts.EVAL_SYSTEM, content=content + extra, output_model=InterviewEvaluation)
+        g = next((a for a in result.answers if a.question_id == q["id"]), result.answers[0] if result.answers else None)
+        if g is None:
+            raise RuntimeError(f"No grade returned for {q['id']}")
+        g.question_id = q["id"]
+        return g
+
+    graded = grade([])
+    ok, bad = _verified_quotes(graded.evidence_quotes, transcript)
+    if graded.score > 2 and not ok:
+        # Every quote was fabricated or paraphrased: re-grade once, telling the grader exactly why.
+        checks["regraded"] = True
+        feedback = ("Your previous grade was rejected: none of these evidence quotes appear verbatim in the "
+                    f"transcript: {json.dumps(bad)}. Re-grade, quoting the transcript exactly.")
+        graded = grade([{"type": "text", "text": feedback}])
+        ok, bad = _verified_quotes(graded.evidence_quotes, transcript)
+    graded.evidence_quotes = ok
+    checks["quotes_rejected"] = bad
+
+    if graded.score > 2 and not ok:
+        graded.score = 2
+        checks["caps"].append("No grader quote could be verified against the transcript, so the score is capped at 2.")
+    words = len(transcript.split())
+    if words < config.MIN_WORDS_FOR_CREDIT and graded.score > 2:
+        graded.score = 2
+        checks["caps"].append(f"The answer has only {words} words (minimum {config.MIN_WORDS_FOR_CREDIT}), so the score is capped at 2.")
+    return graded, checks
 
 
 def evaluate(session_id: str, questions: list[dict], answers: dict) -> dict:
@@ -186,7 +286,9 @@ def evaluate(session_id: str, questions: list[dict], answers: dict) -> dict:
 
     # 1) Independent per-answer grading (parallel).
     with ThreadPoolExecutor(max_workers=min(5, len(questions))) as pool:
-        graded = list(pool.map(lambda q: _grade_one(jd, q, answers.get(q["id"])), questions))
+        results = list(pool.map(lambda q: _grade_one(jd, q, answers.get(q["id"])), questions))
+    graded = [g for g, _ in results]
+    checks = {g.question_id: c for g, c in results}
 
     # 2) Synthesis over the already-fixed scores (it cannot change them).
     summary_input = [
@@ -213,5 +315,6 @@ def evaluate(session_id: str, questions: list[dict], answers: dict) -> dict:
     doc = final.model_dump()
     for a in doc["answers"]:
         a["rating"] = rating_for(a["score"])
+        a["checks"] = checks.get(a["question_id"], {})
     doc["scoring"] = score_interview(final, len(questions))
     return doc

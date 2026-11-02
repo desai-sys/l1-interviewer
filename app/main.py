@@ -65,9 +65,41 @@ def _load(session_id: str) -> dict:
 
 
 def _accepts_answers(s: dict) -> bool:
-    if s["status"] in ("ready", "interviewing"):
+    return s["status"] in ("ready", "interviewing")
+
+
+# ----- Interview rules (enforced here, not in the browser) -------------------
+# Questions are revealed one at a time, each can be answered exactly once, and only
+# before its deadline. A question left unanswered past its deadline is forfeited.
+
+UPLOAD_ALLOWANCE = 15  # seconds of the grace period reserved for uploading the recording
+
+
+def _deadline(answer: dict) -> float:
+    return answer["served_at"] + config.MAX_ANSWER_SECONDS + config.ANSWER_GRACE_SECONDS
+
+
+def _open_question(s: dict):
+    """(index, question, answer) for the question that is served but not yet answered or forfeited."""
+    answers = s.get("answers") or {}
+    for i, q in enumerate(s.get("questions") or []):
+        a = answers.get(q["id"]) or {}
+        if a.get("served_at") and not a.get("audio_key") and not a.get("expired"):
+            return i, q, a
+    return None
+
+
+def _expire_if_overdue(s: dict, now: float) -> bool:
+    cur = _open_question(s)
+    if cur and now > _deadline(cur[2]):
+        storage.set_answer(s["id"], cur[1]["id"], {"expired": True})
+        s["answers"][cur[1]["id"]]["expired"] = True
         return True
-    return s["status"] == "failed" and (s.get("error") or {}).get("stage") == "evaluation"
+    return False
+
+
+def _public_question(q: dict) -> dict:
+    return {k: v for k, v in q.items() if k not in _HIDDEN_UNTIL_DONE and k not in ("source", "source_url", "source_verified")}
 
 
 @app.post("/api/sessions")
@@ -112,17 +144,19 @@ async def create_session(
 def get_session(session_id: str):
     s = _load(session_id)
     done = s["status"] == "completed"
-    questions = [
-        q if done else {k: v for k, v in q.items() if k not in _HIDDEN_UNTIL_DONE}
-        for q in (s.get("questions") or [])
-    ]
+    answers_raw = s.get("answers") or {}
+    all_q = s.get("questions") or []
+    # Before grading, only questions already served are visible (no previewing upcoming questions).
+    questions = all_q if done else [_public_question(q) for q in all_q if (answers_raw.get(q["id"]) or {}).get("served_at")]
     answers = {}
-    for qid, a in (s.get("answers") or {}).items():
-        view = {k: a.get(k) for k in ("duration_seconds", "transcription_status", "submitted_at")}
+    for qid, a in answers_raw.items():
+        view = {k: a.get(k) for k in ("duration_seconds", "transcription_status", "submitted_at", "expired")}
         view["submitted"] = bool(a.get("audio_key"))
         if done:
             view.update(transcript=a.get("transcript"), confidence=a.get("confidence"),
-                        audio_url=storage.presigned_url(a["audio_key"]) if a.get("audio_key") else None)
+                        audio_url=storage.presigned_url(a["audio_key"]) if a.get("audio_key") else None,
+                        integrity={k: a.get(k) for k in ("tab_switches", "hidden_seconds", "fullscreen_exits",
+                                                         "time_to_submit_seconds")})
         answers[qid] = view
     return {
         "id": s["id"],
@@ -131,30 +165,84 @@ def get_session(session_id: str):
         "resume_filename": s.get("resume_filename"),
         "fit": s.get("fit"),
         "questions": questions,
+        "question_count": len(all_q),
         "answers": answers,
+        "web_research": s.get("web_research"),
         "evaluation": s.get("evaluation"),
         "error": s.get("error"),
         "max_answer_seconds": config.MAX_ANSWER_SECONDS,
     }
 
 
+@app.post("/api/sessions/{session_id}/next")
+def next_question(session_id: str):
+    """Serve the next question (or the one still open after a page reload), starting its clock."""
+    s = _load(session_id)
+    if not _accepts_answers(s):
+        raise HTTPException(409, "This interview is not accepting answers.")
+    now = time.time()
+    questions = s.get("questions") or []
+    _expire_if_overdue(s, now)
+
+    def payload(i, q, a, resumed):
+        left = min(config.MAX_ANSWER_SECONDS, _deadline(a) - now - UPLOAD_ALLOWANCE)
+        return {"done": False, "index": i, "total": len(questions), "question": _public_question(q),
+                "seconds_left": max(0, int(left)), "resumed": resumed}
+
+    cur = _open_question(s)
+    if cur:
+        return payload(*cur, resumed=True)
+    for i, q in enumerate(questions):
+        if not (s["answers"].get(q["id"]) or {}).get("served_at"):
+            storage.set_answer(session_id, q["id"], {"served_at": now})
+            if s["status"] == "ready":
+                storage.update_session(session_id, status="interviewing", started_at=int(now))
+            return payload(i, q, {"served_at": now}, resumed=False)
+    return {"done": True, "total": len(questions)}
+
+
 @app.post("/api/sessions/{session_id}/answers/{qid}")
-async def submit_answer(session_id: str, qid: str, audio: UploadFile = File(...), duration_seconds: float = Form(0)):
+async def submit_answer(
+    session_id: str,
+    qid: str,
+    audio: UploadFile = File(...),
+    duration_seconds: float = Form(0),
+    tab_switches: int = Form(0),
+    hidden_seconds: float = Form(0),
+    fullscreen_exits: int = Form(0),
+):
     s = _load(session_id)
     if not _accepts_answers(s):
         raise HTTPException(409, "This interview is not accepting answers.")
     if qid not in {q["id"] for q in s.get("questions") or []}:
         raise HTTPException(404, "Unknown question")
+    existing = s["answers"].get(qid) or {}
+    if existing.get("audio_key"):
+        raise HTTPException(409, "This question has already been answered. Answers cannot be re-recorded.")
+    now = time.time()
+    if _expire_if_overdue(s, now) or existing.get("expired"):
+        raise HTTPException(409, "Time for this question has expired. It is scored as unanswered.")
+    cur = _open_question(s)
+    if not cur or cur[1]["id"] != qid:
+        raise HTTPException(409, "This is not the current question.")
     fmt = transcription.media_format(audio.content_type)
     if not fmt:
         raise HTTPException(415, f"Unsupported audio format: {audio.content_type}")
     data = await audio.read()
-    if len(data) < 1000:
-        raise HTTPException(400, "Recording is empty. Check your microphone and record again.")
     if len(data) > config.MAX_AUDIO_BYTES:
         raise HTTPException(413, "Recording is too large.")
 
-    ts = int(time.time() * 1000)
+    integrity = {
+        "tab_switches": max(0, int(tab_switches)),
+        "hidden_seconds": round(max(0.0, float(hidden_seconds)), 1),
+        "fullscreen_exits": max(0, int(fullscreen_exits)),
+        "time_to_submit_seconds": round(now - existing["served_at"]),
+    }
+    if len(data) < 1000:  # nothing usable was recorded: counts as an unanswered question
+        storage.set_answer(session_id, qid, {"expired": True, "empty_recording": True, **integrity})
+        return {"ok": True, "empty": True}
+
+    ts = int(now * 1000)
     audio_key = f"sessions/{session_id}/audio/{qid}-{ts}.{fmt}"
     transcript_key = f"sessions/{session_id}/transcripts/{qid}-{ts}.json"
     job_name = f"l1-{session_id}-{qid}-{ts}"
@@ -162,13 +250,10 @@ async def submit_answer(session_id: str, qid: str, audio: UploadFile = File(...)
     transcription.start_job(job_name, audio_key, fmt, transcript_key)
     storage.set_answer(session_id, qid, {
         "audio_key": audio_key, "content_type": audio.content_type, "job_name": job_name,
-        "transcript_key": transcript_key, "duration_seconds": round(min(duration_seconds, 3600)),
-        "submitted_at": int(time.time()), "transcription_status": "IN_PROGRESS",
+        "transcript_key": transcript_key,
+        "duration_seconds": round(min(max(duration_seconds, 0), config.MAX_ANSWER_SECONDS + 5)),
+        "submitted_at": int(now), "transcription_status": "IN_PROGRESS", **integrity,
     })
-    if s["status"] == "ready":
-        storage.update_session(session_id, status="interviewing", started_at=int(time.time()))
-    elif s["status"] == "failed":  # re-recording after a failed transcription
-        storage.update_session(session_id, status="interviewing", error=None)
     return {"ok": True}
 
 
@@ -177,8 +262,11 @@ def finish(session_id: str, background: BackgroundTasks):
     s = _load(session_id)
     if not _accepts_answers(s):
         raise HTTPException(409, f"Interview cannot be finished from status '{s['status']}'.")
-    if not any(a.get("audio_key") for a in (s.get("answers") or {}).values()):
-        raise HTTPException(400, "Answer at least one question before finishing.")
+    if not any(a.get("served_at") for a in (s.get("answers") or {}).values()):
+        raise HTTPException(400, "The interview has not started yet.")
+    cur = _open_question(s)
+    if cur:  # ending early forfeits the open question
+        storage.set_answer(session_id, cur[1]["id"], {"expired": True})
     storage.update_session(session_id, status="transcribing", finished_at=int(time.time()))
     background.add_task(pipeline.run_evaluation, session_id)
     return {"ok": True}

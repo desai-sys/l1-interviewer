@@ -45,9 +45,17 @@ LLM_MAX_TOKENS = int(_env("LLM_MAX_TOKENS", "8000"))
 BEDROCK_FALLBACK_MODEL = _env("BEDROCK_FALLBACK_MODEL", "anthropic.claude-opus-5")
 LLM_EFFORT = _env("LLM_EFFORT", "high")
 
+# Web question research (Amazon Nova Web Grounding - US regions / US inference profiles only).
+WEB_RESEARCH = _env("WEB_RESEARCH", "on" if AWS_REGION.startswith("us-") else "off").lower() == "on"
+WEB_RESEARCH_MODEL = _env("WEB_RESEARCH_MODEL", "us.amazon.nova-premier-v1:0")
+
 # Interview
 NUM_QUESTIONS = int(_env("NUM_QUESTIONS", "5"))
 MAX_ANSWER_SECONDS = int(_env("MAX_ANSWER_SECONDS", "180"))
+# Extra time allowed on top of the answer limit for the question being read aloud and the upload.
+ANSWER_GRACE_SECONDS = int(_env("ANSWER_GRACE_SECONDS", "75"))
+# Answers with fewer words than this cannot score above 2/10.
+MIN_WORDS_FOR_CREDIT = int(_env("MIN_WORDS_FOR_CREDIT", "15"))
 # Languages Amazon Transcribe may auto-identify between (comma separated).
 TRANSCRIBE_LANGUAGES = [s.strip() for s in _env("TRANSCRIBE_LANGUAGES", "en-US,en-IN,en-GB").split(",") if s.strip()]
 

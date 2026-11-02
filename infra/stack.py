@@ -77,6 +77,10 @@ class L1InterviewerStack(Stack):
         }
         if ctx("llmModel"):
             environment["LLM_MODEL"] = ctx("llmModel")
+        if ctx("webResearch"):
+            environment["WEB_RESEARCH"] = ctx("webResearch")
+        if ctx("webResearchModel"):
+            environment["WEB_RESEARCH_MODEL"] = ctx("webResearchModel")
         if ctx("accessCode"):
             environment["ACCESS_CODE"] = ctx("accessCode")
         if provider == "aws":
@@ -137,6 +141,11 @@ class L1InterviewerStack(Stack):
                     "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
                     f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
                 ],
+            ))
+            # Amazon Nova Web Grounding (built-in web search used to find real interview questions).
+            role.add_to_principal_policy(iam.PolicyStatement(
+                actions=["bedrock:InvokeTool"],
+                resources=[f"arn:aws:bedrock::{self.account}:system-tool/amazon.nova_grounding"],
             ))
         if provider == "bedrock":
             role.add_to_principal_policy(iam.PolicyStatement(
