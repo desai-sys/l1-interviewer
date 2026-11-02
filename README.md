@@ -38,7 +38,7 @@ CloudFront provides HTTPS, which browsers require before they allow microphone a
 
 ## Deploy to AWS
 
-Prerequisites: an AWS account, AWS CLI v2 configured (`aws configure`), Node 18+, Python 3.11+ and Docker running.
+Prerequisites: an AWS account, AWS CLI v2 configured (`aws configure`), Node 22 or 24 LTS and Python 3.11+. **Docker is not needed**: the container image is built inside AWS by CodeBuild during `cdk deploy` (`infra/image_build.py`).
 
 1. **Enable the model in Bedrock.** In the AWS console, open Amazon Bedrock → Model access in your deploy region and enable **Amazon Nova Pro**. The app calls it through the cross-region inference profile for your region (`us.` / `eu.` / `apac.amazon.nova-pro-v1:0`), so it needs to be enabled in the regions that profile routes to. For stricter, more nuanced grading, enable **Nova Premier** and deploy with `-c llmModel=us.amazon.nova-premier-v1:0` (US regions).
 2. Deploy:
@@ -51,7 +51,7 @@ npx aws-cdk@2 bootstrap        # once per account/region
 npx aws-cdk@2 deploy -c accessCode=CHOOSE-A-PASSCODE
 ```
 
-The deploy takes about 10 minutes, mostly CloudFront. When it finishes it prints `AppUrl` (`https://xxxx.cloudfront.net`). Open it, enter the passcode and start.
+The deploy takes about 15–20 minutes: the image build in CodeBuild takes about 5, CloudFront about 10. When it finishes it prints `AppUrl` (`https://xxxx.cloudfront.net`). Open it, enter the passcode and start.
 
 ### Options (`-c key=value` or `infra/cdk.json`)
 

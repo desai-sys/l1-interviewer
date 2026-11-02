@@ -17,7 +17,6 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
     aws_dynamodb as dynamodb,
     aws_ec2 as ec2,
-    aws_ecr_assets as ecr_assets,
     aws_ecs as ecs,
     aws_ecs_patterns as ecs_patterns,
     aws_iam as iam,
@@ -26,6 +25,8 @@ from aws_cdk import (
     aws_secretsmanager as secretsmanager,
 )
 from constructs import Construct
+
+from image_build import CloudImageBuild
 
 APP_DIR = str(Path(__file__).resolve().parents[1] / "app")
 
@@ -87,6 +88,9 @@ class L1InterviewerStack(Stack):
             api_key = secretsmanager.Secret.from_secret_name_v2(self, "AnthropicKey", "l1-interviewer/anthropic-api-key")
             secrets["ANTHROPIC_API_KEY"] = ecs.Secret.from_secrets_manager(api_key)
 
+        # Container image is built in AWS CodeBuild - no Docker needed on the deploying machine.
+        image = CloudImageBuild(self, "Image", source_dir=APP_DIR)
+
         service = ecs_patterns.ApplicationLoadBalancedFargateService(
             self, "Service",
             cluster=cluster,
@@ -101,7 +105,7 @@ class L1InterviewerStack(Stack):
                 operating_system_family=ecs.OperatingSystemFamily.LINUX,
             ),
             task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
-                image=ecs.ContainerImage.from_asset(APP_DIR, platform=ecr_assets.Platform.LINUX_AMD64),
+                image=ecs.ContainerImage.from_ecr_repository(image.repository, tag=image.tag),
                 container_port=8000,
                 environment=environment,
                 secrets=secrets,
@@ -112,6 +116,7 @@ class L1InterviewerStack(Stack):
             min_healthy_percent=100,
             max_healthy_percent=200,
         )
+        service.service.node.add_dependency(image.resource)  # wait for the image build to finish
         service.target_group.configure_health_check(path="/api/health", healthy_http_codes="200")
         service.target_group.set_attribute("deregistration_delay.timeout_seconds", "30")
         service.load_balancer.set_attribute("idle_timeout.timeout_seconds", "120")

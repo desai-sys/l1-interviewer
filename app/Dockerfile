@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Docker Hub mirror on ECR Public (avoids Docker Hub pull rate limits in CodeBuild)
+FROM public.ecr.aws/docker/library/python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .
