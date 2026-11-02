@@ -58,7 +58,9 @@ def run_screen(session_id: str) -> None:
         storage.update_session(session_id, fit=fit_doc, status="generating_questions")
 
         screen_notes = json.dumps(
-            {"gaps": fit.gaps, "risks_to_probe": fit.risks_to_probe,
+            {"resume_technologies": fit.resume_technologies, "experience_level": fit.experience_level,
+             "years_experience": fit.years_experience,
+             "gaps": fit.gaps, "risks_to_probe": fit.risks_to_probe,
              "unmet_must_haves": fit_doc["scoring"]["unmet_must_haves"]},
             indent=2,
         )
@@ -75,27 +77,42 @@ def run_screen(session_id: str) -> None:
             storage.update_session(session_id, web_research=research, status="generating_questions")
 
         n = config.NUM_QUESTIONS
-        web_min = math.ceil(n / 2) if bank else 0
+        half = n // 2
+        web_min = min(3, half) if bank else 0
         bank_text = "\n".join(f"- {b.question} [topic: {b.topic}] (source_url: {b.source_url})" for b in bank)
-        qs = structured_call(
-            system=prompts.QUESTIONS_SYSTEM.replace("{n}", str(n)).replace("{web_min}", str(web_min)),
-            content=[
-                resume_block,
-                jd_block,
-                {"type": "text", "text": f"<screen_notes>\n{screen_notes}\n</screen_notes>"},
-                {"type": "text", "text": f"<web_question_bank>\n{bank_text}\n</web_question_bank>"},
-                {"type": "text", "text": f"Write exactly {n} interview questions."},
-            ],
-            output_model=QuestionSet,
-        )
+        system = (prompts.QUESTIONS_SYSTEM.replace("{n}", str(n)).replace("{half}", str(half))
+                  .replace("{half_next}", str(half + 1)).replace("{web_min}", str(web_min)))
+        base_content = [
+            resume_block,
+            jd_block,
+            {"type": "text", "text": f"<screen_notes>\n{screen_notes}\n</screen_notes>"},
+            {"type": "text", "text": f"<web_question_bank>\n{bank_text}\n</web_question_bank>"},
+            {"type": "text", "text": f"Generate exactly {n} interview questions now."},
+        ]
+        resume_text = "" if session.get("resume_as_pdf") else storage.get_text(f"sessions/{session_id}/resume.txt")
+        feedback: list[dict] = []
+        for attempt in range(2):  # regenerate once if the code checks fail
+            qs = structured_call(system=system, content=base_content + feedback, output_model=QuestionSet)
+            problems = check_questions(qs.questions, resume_text, n, half)
+            if not problems:
+                break
+            log.warning("question check failed for %s (attempt %s): %s", session_id, attempt + 1, problems)
+            feedback = [{"type": "text", "text": "Your previous question set was rejected by automated checks:\n- "
+                         + "\n- ".join(problems) + "\nFix every problem and generate the full set again."}]
+        if len(qs.questions) < n:
+            raise RuntimeError(f"The model returned {len(qs.questions)} questions instead of {n}.")
+
         bank_urls = {b.source_url: b for b in bank}
         questions = [q.model_dump() for q in qs.questions[:n]]
         for i, q in enumerate(questions, 1):
             q["id"] = f"q{i}"  # normalise ids regardless of model output
+            q["section"] = "concept_foundation" if i <= half else "application_scenario"
             entry = bank_urls.get(q.get("source_url", ""))
             if q["source"] == "web" and entry is None:
                 q["source"], q["source_url"] = "generated", ""  # never show a URL that was not in the bank
             q["source_verified"] = bool(entry and entry.verified)
+            q["resume_verified"] = (not resume_text) or _in_resume(q["technology"], q["resume_evidence"], resume_text)
+        storage.update_session(session_id, intro=qs.intro, question_checks=problems)
         storage.update_session(session_id, questions=questions, status="ready")
     except Exception as exc:
         log.exception("screen failed for %s", session_id)
@@ -110,13 +127,42 @@ def _domain(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def _in_resume(technology: str, evidence: str, resume_text: str) -> bool:
+    """Both the technology name and the quoted resume phrase must literally occur in the resume."""
+    raw = resume_text.lower()
+    tech = re.sub(r"\s+", " ", technology.lower()).strip()
+    ev = _norm(evidence)
+    return bool(tech) and tech in re.sub(r"\s+", " ", raw) and len(ev.split()) >= 1 and ev in _norm(resume_text)
+
+
+def check_questions(questions, resume_text: str, n: int, half: int) -> list[str]:
+    problems = []
+    if len(questions) != n:
+        problems.append(f"Expected exactly {n} questions, got {len(questions)}.")
+    for i, q in enumerate(questions[:n], 1):
+        want = "concept_foundation" if i <= half else "application_scenario"
+        if q.section != want:
+            problems.append(f"Question {i} must be in section {want}.")
+        if want == "concept_foundation" and q.type != "concept":
+            problems.append(f"Question {i} must have type 'concept'.")
+        if want == "application_scenario" and q.type == "concept":
+            problems.append(f"Question {i} must be an application, scenario, troubleshooting or architecture question.")
+        if resume_text and not _in_resume(q.technology, q.resume_evidence, resume_text):
+            problems.append(f"Question {i}: technology '{q.technology}' or resume_evidence '{q.resume_evidence}' "
+                            "does not appear verbatim in the resume. Only ask about technologies in the resume.")
+    if not any(q.type == "troubleshooting" for q in questions[half:n]):
+        problems.append("Include at least one troubleshooting question in the second half.")
+    return problems
+
+
 def research_questions(fit: FitAnalysis, jd: str) -> tuple[list[WebQuestion], dict]:
-    must = [r.requirement for r in fit.requirements if r.importance == "must_have"][:8]
+    techs = fit.resume_technologies[:10]
     prompt = (
-        f"Role: {fit.role_title}\nKey requirements: {'; '.join(must)}\n\n"
-        f"Job description excerpt:\n{jd[:2500]}\n\n"
-        "Search the web and list 15-25 distinct, real interview questions asked for this role that test these "
-        "requirements. Include technical, scenario and behavioral questions."
+        f"Role: {fit.role_title}\nCandidate level: {fit.experience_level} (~{fit.years_experience:g} years)\n"
+        f"Technologies on the candidate's resume: {', '.join(techs)}\n\n"
+        "Search the web and list 15-25 distinct, real L1 interview questions on these technologies: "
+        "conceptual questions on how they work, plus practical scenario, debugging and design questions, "
+        f"pitched at a {fit.experience_level} candidate."
     )
     text, cited = web_search(prompts.RESEARCH_SYSTEM, prompt)
     cited_domains = {_domain(u) for u in cited}
@@ -240,6 +286,7 @@ def _grade_one(jd: str, q: dict, answer: dict | None) -> tuple[AnswerEvaluation,
         "question": q["question"],
         "type": q["type"],
         "assesses": q["assesses"],
+        "evaluator_note": q.get("evaluator_note", ""),
         "key_points": q["key_points"],
         "red_flags": q["red_flags"],
         "rubric": q["rubric"],

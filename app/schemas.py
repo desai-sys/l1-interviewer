@@ -46,6 +46,12 @@ class FitAnalysis(BaseModel):
     strengths: list[str]
     gaps: list[str]
     risks_to_probe: list[str] = Field(description="Claims or gaps an interviewer should verify.")
+    resume_technologies: list[str] = Field(
+        description="Programming languages, frameworks, cloud services and tools explicitly named in the resume, "
+                    "most prominent first, written exactly as in the resume.")
+    experience_level: Literal["fresher", "junior", "mid", "senior", "lead"] = Field(
+        description="Candidate's level judged from total relevant experience in the resume dates.")
+    years_experience: float = Field(description="Total relevant professional experience in years, from resume dates.")
     overall_reasoning: str = Field(description="Why the profile does or does not fit. Do not state a final score.")
 
 
@@ -97,18 +103,25 @@ class Rubric(BaseModel):
 
 class InterviewQuestion(BaseModel):
     id: str = Field(description="q1, q2, ... in order.")
+    section: Literal["concept_foundation", "application_scenario"] = Field(
+        description="concept_foundation for the first half of the questions, application_scenario for the second half.")
+    type: Literal["concept", "application", "scenario", "troubleshooting", "architecture"]
+    technology: str = Field(description="The resume technology this question is about, exactly as written in the resume.")
+    resume_evidence: str = Field(
+        description="Verbatim phrase copied from the resume that mentions this technology (checked by software).")
     question: str = Field(description="Spoken question, max ~45 words, one question only.")
-    type: Literal["technical", "behavioral", "situational", "experience_verification"]
     source: Literal["web", "generated"] = Field(
         description="'web' if selected or adapted from the web question bank, otherwise 'generated'.")
     source_url: str = Field(description="For 'web' questions, the exact source URL from the bank. Otherwise an empty string.")
-    assesses: str = Field(description="Which JD requirement or resume claim this question tests.")
+    assesses: str = Field(description="The concept or skill this question tests.")
+    evaluator_note: str = Field(description="1-2 sentences: what a good answer must include, for the grader.")
     key_points: list[str] = Field(description="Concrete points a strong answer should cover.")
     red_flags: list[str]
     rubric: Rubric
 
 
 class QuestionSet(BaseModel):
+    intro: str = Field(description="1-2 sentence warm welcome spoken by the interviewer before question 1.")
     questions: list[InterviewQuestion]
 
 

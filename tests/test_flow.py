@@ -31,7 +31,8 @@ def fake_fit():
         "requirements": [{"requirement": "Kafka", "importance": "nice_to_have", "status": "not_met",
                           "evidence": "No evidence in resume.", "reasoning": "r"}],
         "score_breakdown": {"skills": dim, "experience": dim, "domain": dim, "education_certifications": dim},
-        "strengths": ["a"], "gaps": ["b"], "risks_to_probe": ["c"], "overall_reasoning": "o"})
+        "strengths": ["a"], "gaps": ["b"], "risks_to_probe": ["c"], "overall_reasoning": "o",
+        "resume_technologies": ["Python", "AWS Lambda", "DynamoDB"], "experience_level": "mid", "years_experience": 7})
 
 
 BANK_URL = "https://www.glassdoor.com/Interview/backend-q1"
@@ -39,10 +40,15 @@ GOOD_ANSWER = ("I would design it with an API gateway in front of Lambda functio
                "with a partition key per tenant, and add idempotency keys so retries are safe.")
 
 
-def fake_questions(n=3):
+def fake_questions(n=3, bad_tech=False):
     srcs = [("web", BANK_URL), ("web", "https://made-up.example.com/x"), ("generated", "")]
-    return QuestionSet.model_validate({"questions": [{
-        "id": f"x{i}", "question": f"Question {i}?", "type": "technical", "assesses": "a",
+    plan = [("concept_foundation", "concept", "Kafka" if bad_tech else "Python"),
+            ("application_scenario", "troubleshooting", "DynamoDB"),
+            ("application_scenario", "architecture", "AWS Lambda")]
+    return QuestionSet.model_validate({"intro": "Welcome! Let's begin.", "questions": [{
+        "id": f"x{i}", "question": f"Question {i}?", "section": plan[i][0], "type": plan[i][1],
+        "technology": plan[i][2], "resume_evidence": "Built Python REST APIs on AWS Lambda and DynamoDB",
+        "assesses": "a", "evaluator_note": "good answers mention X",
         "source": srcs[i][0], "source_url": srcs[i][1],
         "key_points": ["k"], "red_flags": ["r"],
         "rubric": {"excellent": "e", "adequate": "a", "poor": "p"}} for i in range(n)]})
@@ -70,7 +76,8 @@ def client(monkeypatch):
             if output_model is FitAnalysis:
                 return fake_fit()
             if output_model is QuestionSet:
-                return fake_questions()
+                first = not any(name == "QuestionSet" for name, _ in calls[:-1])
+                return fake_questions(bad_tech=first)
             text = json.dumps(content)
             if "graded_answers" in text:
                 return InterviewEvaluation(answers=[], strengths=["s"], concerns=["c"], overall_reasoning="o")
@@ -123,13 +130,17 @@ def test_full_flow(client):
     assert s["fit"]["scoring"]["overall_score"] == 80
     assert s["question_count"] == 3 and s["questions"] == [], "questions must not be visible before they are served"
     assert s["web_research"]["status"] == "ok" and s["web_research"]["questions_found"] == 1  # uncited URL dropped
+    assert s["intro"] == "Welcome! Let's begin."
+    qcalls = [c for name, c in client.calls if name == "QuestionSet"]
+    assert len(qcalls) == 2 and "Kafka" in json.dumps(qcalls[1]), "set asking about a non-resume tech must be regenerated"
 
     # Answering ahead of the served question is refused.
     assert _answer(client, sid, "q2").status_code == 409
 
     n = client.post(f"/api/sessions/{sid}/next").json()
     assert n["index"] == 0 and n["question"]["id"] == "q1" and n["seconds_left"] == 180
-    assert "rubric" not in n["question"] and "source_url" not in n["question"]
+    assert "rubric" not in n["question"] and "source_url" not in n["question"] and "evaluator_note" not in n["question"]
+    assert n["question"]["section"] == "concept_foundation"
     assert client.post(f"/api/sessions/{sid}/next").json()["resumed"] is True  # reload: same question, clock running
 
     assert _answer(client, sid, "q1", tab_switches="2", hidden_seconds="7").status_code == 200
@@ -155,6 +166,8 @@ def test_full_flow(client):
     qs = {q["id"]: q for q in s["questions"]}
     assert qs["q1"]["source"] == "web" and qs["q1"]["source_url"] == BANK_URL and qs["q1"]["source_verified"]
     assert qs["q2"]["source"] == "generated" and qs["q2"]["source_url"] == "", "URL not in the bank must be dropped"
+    assert qs["q1"]["technology"] == "Python" and qs["q1"]["resume_verified"] and qs["q1"]["evaluator_note"]
+    assert [q["section"] for q in s["questions"]] == ["concept_foundation", "application_scenario", "application_scenario"]
     assert s["answers"]["q1"]["integrity"]["tab_switches"] == 2
     assert s["answers"]["q3"]["expired"] is True
 
@@ -265,3 +278,15 @@ def test_default_model_is_regional_nova():
     import config
     assert config._geo_prefix("ap-south-1") == "apac" and config._geo_prefix("us-east-1") == "us"
     assert config._geo_prefix("eu-west-1") == "eu"
+
+
+def test_question_checks():
+    import pipeline
+    ok = fake_questions().questions
+    assert pipeline.check_questions(ok, RESUME, 3, 1) == []
+    bad = fake_questions(bad_tech=True).questions
+    assert any("Kafka" in p for p in pipeline.check_questions(bad, RESUME, 3, 1))
+    swapped = [ok[1], ok[0], ok[2]]
+    probs = pipeline.check_questions(swapped, RESUME, 3, 1)
+    assert any("section concept_foundation" in p for p in probs)
+    assert pipeline.check_questions(ok[:2], RESUME, 3, 1)[0].startswith("Expected exactly 3")

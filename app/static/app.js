@@ -175,7 +175,7 @@ function renderInterview(s) {
   const resuming = s.status === "interviewing";
   el.innerHTML = `<div class="card">
     <h2>${resuming ? "Continue your interview" : "Voice interview"}</h2>
-    <p>${s.question_count} questions · up to ${fmtTime(s.max_answer_seconds)} per answer · answers by voice only.</p>
+    <p>${s.question_count} questions (${Math.floor(s.question_count / 2)} concept &amp; foundation, then ${s.question_count - Math.floor(s.question_count / 2)} application &amp; scenario) · up to ${fmtTime(s.max_answer_seconds)} per answer · answers by voice only.</p>
     <div class="notice small"><b>Rules</b>
       <ul class="tight">
         <li>Each question is read aloud once. <b>Recording starts automatically</b> the moment it finishes — start speaking straight away.</li>
@@ -199,8 +199,16 @@ async function startInterview(s) {
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("fullscreenchange", onFullscreen);
   window.addEventListener("beforeunload", onBeforeUnload);
-  nextQuestion();
+  if (s.status === "ready" && s.intro) {
+    // Untimed welcome from the interviewer, then question 1 (whose clock starts when it is served).
+    document.getElementById("interview").innerHTML = `<div class="card interview">
+      <div class="qcount">Interviewer</div><div class="question">${esc(s.intro)}</div>
+      <p class="muted"><span class="spinner"></span> Question 1 starts right after this…</p></div>`;
+    speakThen(s.intro, nextQuestion);
+  } else nextQuestion();
 }
+
+const SECTION = { concept_foundation: "Concept & Foundation", application_scenario: "Application & Scenario" };
 
 const freshCounters = () => ({ tab_switches: 0, hidden_seconds: 0, fullscreen_exits: 0 });
 
@@ -245,7 +253,7 @@ async function nextQuestion() {
   iv.q = n.question; iv.counters = freshCounters();
   const dots = Array.from({ length: n.total }, (_, i) => `<i class="${i < n.index ? "done" : i === n.index ? "cur" : ""}"></i>`).join("");
   el.innerHTML = `<div class="card interview"><div class="qdots">${dots}</div>
-    <div class="qcount">Question ${n.index + 1} of ${n.total} · ${esc(n.question.type.replace("_", " "))}</div>
+    <div class="qcount">Question ${n.index + 1} of ${n.total} · ${esc(SECTION[n.question.section] || n.question.type)}</div>
     <div class="question">${esc(n.question.question)}</div>
     <div class="recorder">
       <div class="mic" id="mic" aria-hidden="true">🔊</div>
@@ -400,8 +408,9 @@ function evaluationReport(s) {
     const a = byId[q.id] || {}, ans = s.answers[q.id] || {};
     const t = a.score >= 7 ? "good" : a.score >= 5 ? "warn" : "bad";
     return `<div class="card qcard">
-      <div class="head"><div style="flex:1"><div class="qcount">Question ${i + 1} · ${esc(q.type.replace("_", " "))}</div>
-        <h3 style="margin-top:4px">${esc(q.question)}</h3><p class="small muted">Assesses: ${esc(q.assesses)}</p>
+      <div class="head"><div style="flex:1"><div class="qcount">Question ${i + 1} · ${esc(SECTION[q.section] || "")} · ${esc(q.type)}</div>
+        <h3 style="margin-top:4px">${esc(q.question)}</h3><p class="small muted">Assesses: ${esc(q.assesses)}${q.technology ? ` · Technology: ${esc(q.technology)}` : ""}</p>
+        ${q.resume_evidence ? `<p class="small muted">From resume: “${esc(q.resume_evidence)}”${q.resume_verified === false ? ` <span class="pill warn">not found in resume</span>` : ""}</p>` : ""}
         <p class="small">${q.source === "web" && q.source_url ? `<span class="pill neutral">From the web</span> <a href="${esc(q.source_url)}" target="_blank" rel="noopener noreferrer">${esc(new URL(q.source_url).hostname)}</a>${q.source_verified ? "" : ` <span class="muted">(source unverified)</span>`}` : `<span class="pill neutral">AI-generated for this role</span>`}</p></div>
         <div class="qscore">${a.score ?? 0}<span class="muted small">/10</span><br><span class="pill ${t}">${esc((a.rating || "").replace("_", " "))}</span></div></div>
       ${ans.audio_url ? `<audio controls preload="none" src="${esc(ans.audio_url)}"></audio>` : `<p class="muted small">Not answered.</p>`}
@@ -415,6 +424,7 @@ function evaluationReport(s) {
       ${a.checks?.quotes_rejected?.length ? `<p class="small muted">${a.checks.quotes_rejected.length} grader quote(s) were discarded because they did not appear in the transcript${a.checks.regraded ? "; the answer was re-graded" : ""}.</p>` : ""}
       <h3>How to improve</h3><p>${esc(a.improvement_advice)}</p>
       ${integrityLine(ans)}
+      ${q.evaluator_note ? `<p class="small"><b>Evaluator note:</b> ${esc(q.evaluator_note)}</p>` : ""}
       <details><summary>Grading rubric (written before the interview)</summary>
         <p><b>Excellent:</b> ${esc(q.rubric?.excellent)}</p><p><b>Adequate:</b> ${esc(q.rubric?.adequate)}</p><p><b>Poor:</b> ${esc(q.rubric?.poor)}</p>
         <b>Key points</b>${list(q.key_points)}</details>

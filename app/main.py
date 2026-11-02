@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 app = FastAPI(title="L1 Interviewer", docs_url=None, redoc_url=None)
 
 # Questions are visible to the candidate; the grading rubric is hidden until the interview is graded.
-_HIDDEN_UNTIL_DONE = ("key_points", "red_flags", "rubric")
+_HIDDEN_UNTIL_DONE = ("key_points", "red_flags", "rubric", "evaluator_note", "resume_evidence", "resume_verified")
 
 
 @app.middleware("http")
@@ -168,6 +168,7 @@ def get_session(session_id: str):
         "question_count": len(all_q),
         "answers": answers,
         "web_research": s.get("web_research"),
+        "intro": s.get("intro"),
         "evaluation": s.get("evaluation"),
         "error": s.get("error"),
         "max_answer_seconds": config.MAX_ANSWER_SECONDS,

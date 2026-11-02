@@ -73,7 +73,7 @@ class L1InterviewerStack(Stack):
             "BUCKET_NAME": bucket.bucket_name,
             "TABLE_NAME": table.table_name,
             "LLM_PROVIDER": provider,
-            "NUM_QUESTIONS": ctx("numQuestions", "5"),
+            "NUM_QUESTIONS": ctx("numQuestions", "10"),
         }
         if ctx("llmModel"):
             environment["LLM_MODEL"] = ctx("llmModel")

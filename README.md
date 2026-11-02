@@ -4,6 +4,9 @@ Upload a resume and a job description and you get:
 
 1. **Profile fit report.** Each JD requirement is checked against quoted evidence from the resume. You get a weighted fit score (0–100), a verdict, strengths and gaps.
 2. **Voice-only interview.** Nova searches the web (Amazon Nova Web Grounding) for real interview questions for this role. At least half of the interview is drawn from them, each with its source link. The rest are written to target the JD's must-haves and the gaps in the resume. Each question is read aloud and **recording starts automatically the moment it finishes**. There is no text input, no replay, no skipping and no re-recording.
+   - **10 questions, fixed structure:** questions 1–5 (*Concept & Foundation*) test fundamentals of the languages, frameworks, cloud services and tools **explicitly on the resume**. Questions 6–10 (*Application & Scenario*) are L1 scenario, debugging and architecture questions at the candidate's experience level, with at least one troubleshooting question.
+   - Each question names its resume technology and quotes the resume line that mentions it. The code checks both and regenerates the set if a question asks about anything not on the resume.
+   - Each question carries an **evaluator note** (what a good answer must include) and a fixed rubric. The interviewer opens with a short spoken welcome.
 3. **Strict evaluation.** Every answer is recorded, transcribed with Amazon Transcribe, and scored 0–10 against a rubric. Each score comes with reasoning, verbatim evidence quotes, key points covered and missed, and advice on how to improve.
 4. **Records.** The audio for each answer, its transcript, a full interview transcript (`.txt`) and a full JSON report are stored in S3.
 
@@ -64,7 +67,7 @@ The deploy takes about 15–20 minutes: the image build in CodeBuild takes about
 | `accessCode` | *(none)* | Shared passcode required for every API call. **Recommended**: without it, anyone with the URL can spend your Claude and Transcribe budget. |
 | `llmProvider` | `nova` | `nova` (Amazon Nova on Bedrock). To use Claude later: `bedrock` (Claude on Bedrock), `aws` (Claude Platform on AWS, also needs `awsWorkspaceId`), or `anthropic` (Claude API; store the key first in Secrets Manager as `l1-interviewer/anthropic-api-key`) |
 | `llmModel` | `<geo>.amazon.nova-pro-v1:0` | Model or inference profile ID, e.g. `us.amazon.nova-premier-v1:0` |
-| `numQuestions` | `5` | Questions per interview |
+| `numQuestions` | `10` | Questions per interview (first half concept, second half scenario) |
 | `webResearch` | `on` in US regions | `on`/`off`: search the web for real interview questions (Nova Web Grounding, US regions only) |
 | `webResearchModel` | `us.amazon.nova-premier-v1:0` | Model used for web search (`us.amazon.nova-2-lite-v1:0` also supports it) |
 

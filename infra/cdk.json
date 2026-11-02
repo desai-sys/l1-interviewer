@@ -4,6 +4,6 @@
     "llmProvider": "nova",
     "llmModel": "",
     "accessCode": "",
-    "numQuestions": "5"
+    "numQuestions": "10"
   }
 }

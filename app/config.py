@@ -50,7 +50,7 @@ WEB_RESEARCH = _env("WEB_RESEARCH", "on" if AWS_REGION.startswith("us-") else "o
 WEB_RESEARCH_MODEL = _env("WEB_RESEARCH_MODEL", "us.amazon.nova-premier-v1:0")
 
 # Interview
-NUM_QUESTIONS = int(_env("NUM_QUESTIONS", "5"))
+NUM_QUESTIONS = int(_env("NUM_QUESTIONS", "10"))
 MAX_ANSWER_SECONDS = int(_env("MAX_ANSWER_SECONDS", "180"))
 # Extra time allowed on top of the answer limit for the question being read aloud and the upload.
 ANSWER_GRACE_SECONDS = int(_env("ANSWER_GRACE_SECONDS", "75"))
